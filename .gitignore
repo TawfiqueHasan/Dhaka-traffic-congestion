@@ -1,0 +1,8 @@
+﻿venv/
+data/
+runs/
+*.mp4
+*.pt
+__pycache__/
+.ipynb_checkpoints/
+*.cache

@@ -1,0 +1,172 @@
+# Phase 3 — Data Wrangling Methodology (FINAL)
+
+> Records every dataset-wrangling decision with exact numbers, ready to drop
+> into the paper's Methodology section and serve as the audit trail for the
+> graded wrangling work. Updated to the final 3-dataset, 10-class build.
+
+---
+
+## 1. Objective
+
+Produce a single clean, training-ready vehicle-detection dataset of Dhaka
+traffic, reconciled from **three** public sources that use **two different file
+formats** and **three different class vocabularies** — and reshape the label
+space so it is (a) balanced enough to train and (b) meaningful for a *congestion*
+task rather than fine-grained vehicle identification.
+
+---
+
+## 2. Source datasets
+
+| # | Source | Format | Images | Objects | Raw classes |
+|---|--------|--------|-------:|--------:|------------:|
+| 1 | trafic_data (DhakaAI-derived) | YOLO `.txt` | 3,004 | 24,348 | 21 |
+| 2 | Poribohon-BD (mixed subset) | Pascal VOC `.xml` | 101 | ~960 | up to 15 |
+| 3 | ODS_New (BNVD-derived) | YOLO `.txt` (flat) | 17,326 | 81,542 | 17 |
+
+Incompatibilities resolved: **format** (YOLO vs VOC pixel-corner XML) and
+**taxonomy** (e.g. `three wheelers -CNG-` vs `cng`; `motorbike` vs `bike`;
+`Leguna` vs `human hauler`).
+
+---
+
+## 3. Inspection findings (before cleaning)
+
+- **trafic_data**: structurally clean (3,004/3,004 pairing, 0 malformed, 2 empty
+  labels) but **severely imbalanced** — car 5,474 vs garbagevan 3,
+  **imbalance ratio 1825x**. Many classes (garbagevan 3, policecar 32,
+  scooter 38, army vehicle 43, taxi 60) far below trainable thresholds.
+- **Poribohon**: VOC XML; ~100 dense "mixed" multi-vehicle images; contained
+  water vehicles (boat, launch) irrelevant to road traffic; 1 image–annotation
+  count mismatch (orphan).
+- **ODS_New**: large (17,326 images); rich local classes including Leguna,
+  Easybike, Bhotbhoti, PowerTiller, Pedestrian; 20 annotations with bounding-box
+  coordinates marginally exceeding image bounds (manual-annotation artifact).
+
+---
+
+## 4. Design decision: a congestion-relevant 10-class taxonomy
+
+Rather than keep dozens of fragile fine-grained classes (or delete rare ones),
+all raw classes were **consolidated** into 10 super-classes grouped primarily by
+*traffic-flow behaviour* (size, speed, road footprint, propulsion) — the
+properties that affect a congestion index. **No road vehicle was discarded**;
+rare types were absorbed. Only non-road vehicles (boats, launches, horse-carts,
+tractors) were dropped.
+
+### Final classes
+`0 car · 1 bus_truck · 2 rickshaw · 3 cng · 4 motorbike · 5 bicycle ·
+6 human_hauler · 7 pedestrian · 8 paddlefoot_transportation · 9 auto_transportation`
+
+### Unified mapping (all three sources)
+
+| Unified class | Raw labels mapped in |
+|---|---|
+| car | car, taxi, suv, minivan, policecar, ambulance, army vehicle, MPV |
+| bus_truck | bus, minibus, truck, pickup, garbagevan |
+| rickshaw | rickshaw (human-pedalled) |
+| cng | three wheelers -CNG-, auto rickshaw, cng, easybike |
+| motorbike | motorbike, scooter, bike |
+| bicycle | bicycle |
+| human_hauler | human hauler, leguna |
+| pedestrian | pedestrian |
+| paddlefoot_transportation | van, shoppingvan, wheelbarrow |
+| auto_transportation | powertiller, bhotbhoti |
+| **dropped (non-road)** | boat, launch, horse-cart, tractor |
+
+**Key rationale**
+- `rickshaw` (pedalled) kept separate from `cng` (motorised three-wheeler):
+  very different speed profiles, central to a speed-based congestion index.
+- `auto rickshaw` routed to `cng` (not `rickshaw`) for the same reason.
+- `human_hauler` (Leguna) kept as its own class: distinctive stop-start local
+  vehicle supporting the "heterogeneous local traffic" thesis.
+- `pedestrian` retained as a class: pedestrians materially affect Dhaka
+  congestion (crossings, jaywalking) and ODS_New provides 10,581 examples.
+- Two custom groupings (paddlefoot_transportation, auto_transportation) collect
+  van-like and rural/non-standard engine vehicles respectively.
+
+---
+
+## 5. Transformations applied
+
+A single master build script (`06_build_unified_dataset.py`) rebuilds everything
+from the **untouched raw sources** in one consistent pass:
+
+1. **trafic_data (YOLO):** rewrote class ids 21-scheme -> 10-scheme via the
+   universal name map.
+2. **Poribohon (VOC -> YOLO):** parsed XML; converted pixel corners to normalized
+   YOLO boxes
+   `xc=(xmin+xmax)/2/W, yc=(ymin+ymax)/2/H, w=(xmax-xmin)/W, h=(ymax-ymin)/H`;
+   clamped out-of-bounds boxes; dropped degenerate boxes; sanitized filenames
+   with spaces/parentheses (`mixed (1)` -> `mixed_1`).
+3. **ODS_New (flat YOLO):** remapped 17-scheme -> 10-scheme; split 85/15
+   train/valid.
+4. **Merge:** combined all into `final/` with source-prefixed filenames
+   (`td_`, `pb_`, `od_`) to prevent collisions; fixed random seed (42) for
+   reproducible splits; wrote `data.yaml` (nc=10). Unknown class names are
+   reported, never silently mishandled.
+
+### Post-merge validation & repair
+Validation (`08_validate_labels.py`) of the merged set found **20 rows with
+bounding-box coordinates marginally exceeding [0,1]** (manual-annotation
+artifact in ODS_New). These caused a CUDA device-side assert at train time.
+A repair pass (`09_fix_label_coords.py`) clamped all box corners to valid bounds
+and dropped any degenerate boxes; re-validation confirmed 0 out-of-range rows.
+
+---
+
+## 6. Result (final unified dataset)
+
+**20,415 images · 106,651 objects · 10 classes**
+
+| ID | Class | Objects | Share |
+|----|-------|--------:|------:|
+| 0 | car | 21,550 | 20.2% |
+| 1 | bus_truck | 18,034 | 16.9% |
+| 3 | cng | 18,116 | 17.0% |
+| 2 | rickshaw | 15,043 | 14.1% |
+| 7 | pedestrian | 10,581 | 9.9% |
+| 4 | motorbike | 10,050 | 9.4% |
+| 8 | paddlefoot_transportation | 5,847 | 5.5% |
+| 5 | bicycle | 3,563 | 3.3% |
+| 9 | auto_transportation | 2,486 | 2.3% |
+| 6 | human_hauler | 1,381 | 1.3% |
+
+- **Imbalance reduced from 1825x to 16x** — from untrainable to standard.
+- Every class present in **both** train and valid splits (earlier rare-class
+  validation gap resolved by ODS_New volume).
+- ODS_New supplies ~85% of objects (backbone); datasets 1–2 enrich. The
+  contribution is the demonstrated multi-source, multi-format reconciliation.
+
+---
+
+## 7. Known limitations (stated honestly)
+
+- Minority classes `human_hauler` (1,381) and `auto_transportation` (2,486) will
+  likely show lower per-class recall; to be reported transparently.
+- A small number of source JPEGs are mildly corrupt (truncated segments); these
+  are skipped at load time and do not affect training materially.
+- Residual 16x imbalance remains; can be addressed via class weighting or
+  augmentation if needed.
+- Two custom groupings (paddlefoot_transportation, auto_transportation) bundle
+  visually heterogeneous vehicles; named for project-specific convenience and
+  defined explicitly here for reader clarity.
+
+---
+
+## 8. Reproducibility
+
+- Random seed fixed (42) for all splits.
+- Raw sources never modified; all transforms write to new folders, giving a full
+  audit trail.
+- Pipeline scripts: `06_build_unified_dataset.py` (build),
+  `08_validate_labels.py` (validate), `09_fix_label_coords.py` (repair).
+
+---
+
+## 9. Detector training (Phase 4 — for context)
+
+Fine-tuned **YOLOv8m** on the unified dataset: 300 epochs (early stopping
+patience 50), imgsz 1280, batch 2, RTX 3060 12GB, best weights saved.
+High input resolution chosen to aid detection of small/distant vehicles in
+overhead foot-overbridge footage.
